@@ -1,0 +1,6 @@
+{
+  "name": "CareConnect — Assistive Communication System",
+  "description": "Assistive communication and patient safety system with gesture control, automatic speech synthesis, YES/NO confirmation, and Blynk caregiver alerts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
