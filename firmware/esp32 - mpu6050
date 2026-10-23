@@ -1,0 +1,499 @@
+#define BLYNK_TEMPLATE_ID "TMPL3qYczGIdl"
+#define BLYNK_TEMPLATE_NAME "CareConnect"
+#define BLYNK_AUTH_TOKEN "22LI5nQ2nykpnqflD499V_JbmT9zHtsm"
+
+#include <Wire.h>
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <HijelHID_BLEMouse.h>
+#include <math.h>
+
+// ================= WIFI =================
+char ssid[] = "shristi";
+char pass[] = "shristi61";
+
+// ================= BLUETOOTH MOUSE =================
+HijelBLEMouse mouse(
+  "MPU6050 Mouse",
+  "Sankalp",
+  100,
+  3,
+  false
+);
+
+// ================= PINS =================
+#define BUTTON_PIN 4
+
+// Blynk dashboard datastreams
+#define VPIN_MEDICAL_ASSISTANCE V0
+#define VPIN_CALL_CARETAKER     V1
+#define VPIN_MEDICINE_TIME      V2
+
+// ================= TIMING =================
+const unsigned long LONG_PRESS_TIME = 2000;
+const unsigned long ALERT_COOLDOWN = 30000;
+const unsigned long SENSOR_INTERVAL = 20;
+
+unsigned long lastSensorTime = 0;
+unsigned long lastFallAlertTime = 0;
+unsigned long lastWiFiAttempt = 0;
+unsigned long lastBlynkAttempt = 0;
+
+// ================= MPU6050 =================
+const uint8_t MPU_ADDR = 0x68;
+
+bool sensorReady = false;
+
+const int gyroOffsetX = -540;
+const int gyroOffsetY = 150;
+
+const int deadZone = 500;
+const float sensitivity = 0.008;
+const float smoothFactor = 0.75;
+const int maxMove = 15;
+
+float smoothX = 0;
+float smoothY = 0;
+
+// ================= FALL DETECTION =================
+bool possibleFreefall = false;
+unsigned long freefallStart = 0;
+
+// ================= BUTTON STATE =================
+bool buttonWasPressed = false;
+bool longPressHandled = false;
+unsigned long buttonPressStart = 0;
+
+// ================= MPU REGISTER FUNCTIONS =================
+bool writeRegister(uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+bool readRegisters(
+  uint8_t startReg,
+  uint8_t count,
+  uint8_t *buffer
+) {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(startReg);
+
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  uint8_t received = Wire.requestFrom(
+    MPU_ADDR,
+    count,
+    (uint8_t)true
+  );
+
+  if (received != count) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < count; i++) {
+    buffer[i] = Wire.read();
+  }
+
+  return true;
+}
+
+int16_t read16(uint8_t reg) {
+  uint8_t data[2];
+
+  if (!readRegisters(reg, 2, data)) {
+    return 0;
+  }
+
+  return (int16_t)(
+    ((uint16_t)data[0] << 8) |
+    data[1]
+  );
+}
+
+// ================= COMMON BLYNK EVENT =================
+void sendBlynkEvent(
+  const char *eventCode,
+  const char *message
+) {
+  Serial.println();
+  Serial.print("Blynk event: ");
+  Serial.println(eventCode);
+
+  Serial.println(message);
+
+  if (Blynk.connected()) {
+    Blynk.logEvent(eventCode, message);
+    Serial.println("Event submitted to Blynk.");
+  } else {
+    Serial.println(
+      "Blynk offline: event not submitted."
+    );
+  }
+}
+
+// ================= EVENT 1: FALL DETECTED =================
+void sendFallAlert(
+  const char *reason,
+  float acceleration
+) {
+  unsigned long now = millis();
+
+  if (
+    lastFallAlertTime != 0 &&
+    now - lastFallAlertTime < ALERT_COOLDOWN
+  ) {
+    Serial.println("Fall alert cooldown active.");
+    return;
+  }
+
+  lastFallAlertTime = now;
+
+  char message[120];
+
+  snprintf(
+    message,
+    sizeof(message),
+    "%s | Acceleration: %.2f g",
+    reason,
+    (double)acceleration
+  );
+
+  sendBlynkEvent("fall_detected", message);
+}
+
+// ================= EVENT 2: EMERGENCY DETECTED =================
+void sendSOSAlert() {
+  sendBlynkEvent(
+    "emergency_detected",
+    "SOS button held for 2 seconds on CareConnect."
+  );
+}
+
+// ================= EVENT 3: MEDICAL ASSISTANCE =================
+void sendMedicalAssistance() {
+  sendBlynkEvent(
+    "medical_assistance",
+    "Medical assistance requested from CareConnect."
+  );
+}
+
+// ================= EVENT 4: CALL CARETAKER =================
+void sendCaretakerAlert() {
+  sendBlynkEvent(
+    "call_caretaker",
+    "The user has requested a caretaker call."
+  );
+}
+
+// ================= EVENT 5: MEDICINE TIME =================
+void sendMedicineAlert() {
+  sendBlynkEvent(
+    "medicine_time",
+    "Medicine time reminder triggered from CareConnect."
+  );
+}
+
+// ================= BLYNK APP BUTTONS =================
+// Create Integer datastreams V0, V1 and V2.
+// Configure each dashboard Button widget as PUSH, 0-1.
+
+BLYNK_WRITE(V0) {
+  if (param.asInt() == 1) {
+    sendMedicalAssistance();
+  }
+}
+
+BLYNK_WRITE(V1) {
+  if (param.asInt() == 1) {
+    sendCaretakerAlert();
+  }
+}
+
+BLYNK_WRITE(V2) {
+  if (param.asInt() == 1) {
+    sendMedicineAlert();
+  }
+}
+
+// ================= PHYSICAL BUTTON =================
+// Short press = Bluetooth left click
+// Long press = emergency_detected
+
+void handleButton() {
+  bool pressed = (digitalRead(BUTTON_PIN) == LOW);
+  unsigned long now = millis();
+
+  if (pressed && !buttonWasPressed) {
+    buttonWasPressed = true;
+    buttonPressStart = now;
+    longPressHandled = false;
+  }
+
+  if (
+    pressed &&
+    buttonWasPressed &&
+    !longPressHandled &&
+    now - buttonPressStart >= LONG_PRESS_TIME
+  ) {
+    longPressHandled = true;
+    sendSOSAlert();
+  }
+
+  if (!pressed && buttonWasPressed) {
+    unsigned long duration =
+      now - buttonPressStart;
+
+    if (
+      !longPressHandled &&
+      duration < LONG_PRESS_TIME
+    ) {
+      if (mouse.isPaired()) {
+        mouse.click(MouseButton::Left, 30);
+        Serial.println("Bluetooth left click.");
+      } else {
+        Serial.println(
+          "Mouse not paired; click skipped."
+        );
+      }
+    }
+
+    buttonWasPressed = false;
+    longPressHandled = false;
+  }
+}
+
+// ================= FALL DETECTION =================
+void detectFall(float ax, float ay, float az) {
+  float acceleration = sqrt(
+    ax * ax + ay * ay + az * az
+  );
+
+  unsigned long now = millis();
+
+  // Possible freefall: below 0.5 g
+  if (acceleration < 0.5) {
+    if (!possibleFreefall) {
+      possibleFreefall = true;
+      freefallStart = now;
+
+      Serial.println("Possible freefall detected.");
+    }
+  }
+
+  // Impact: 2.5 g or above
+  if (acceleration >= 2.5) {
+    if (
+      possibleFreefall &&
+      now - freefallStart <= 2000
+    ) {
+      sendFallAlert(
+        "Possible fall detected",
+        acceleration
+      );
+    } else {
+      sendFallAlert(
+        "Strong impact detected",
+        acceleration
+      );
+    }
+
+    possibleFreefall = false;
+  }
+
+  // Expire an old freefall candidate
+  if (
+    possibleFreefall &&
+    now - freefallStart > 2000
+  ) {
+    possibleFreefall = false;
+  }
+}
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  // ESP32 I2C: SDA = GPIO 21, SCL = GPIO 22
+  Wire.begin(21, 22);
+
+  // Wake MPU6050
+  if (!writeRegister(0x6B, 0x00)) {
+    Serial.println("MPU6050 communication failed.");
+  } else {
+    // Accelerometer range: +/- 2 g
+    writeRegister(0x1C, 0x00);
+
+    // Gyroscope range: +/- 250 degrees/sec
+    writeRegister(0x1B, 0x00);
+
+    sensorReady = true;
+    Serial.println("MPU6050 initialized.");
+  }
+
+  // Start Bluetooth mouse
+  mouse.begin();
+
+  Serial.println("Bluetooth mouse started.");
+  Serial.println("Short press: left click");
+  Serial.println("Hold 2 seconds: SOS");
+
+  // Start Wi-Fi
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, pass);
+
+  Serial.print("Connecting to Wi-Fi...");
+
+  unsigned long start = millis();
+
+  while (
+    WiFi.status() != WL_CONNECTED &&
+    millis() - start < 10000
+  ) {
+    delay(250);
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Wi-Fi connected.");
+
+    Blynk.config(BLYNK_AUTH_TOKEN);
+
+    if (Blynk.connect(3000)) {
+      Serial.println("Blynk connected.");
+    } else {
+      Serial.println("Blynk connection pending.");
+    }
+  } else {
+    Serial.println(
+      "Wi-Fi unavailable. Offline mode enabled."
+    );
+  }
+
+  Serial.println();
+  Serial.println("CareConnect initialization complete.");
+  Serial.println("Configured Blynk event codes:");
+  Serial.println("1. fall_detected");
+  Serial.println("2. emergency_detected");
+  Serial.println("3. medical_assistance");
+  Serial.println("4. call_caretaker");
+  Serial.println("5. medicine_time");
+}
+
+// ================= MAIN LOOP =================
+void loop() {
+  unsigned long now = millis();
+
+  // Retry Wi-Fi connection every 10 seconds
+  if (WiFi.status() != WL_CONNECTED) {
+    if (now - lastWiFiAttempt >= 10000) {
+      lastWiFiAttempt = now;
+      WiFi.reconnect();
+    }
+  }
+
+  // Retry Blynk connection every 5 seconds
+  if (
+    WiFi.status() == WL_CONNECTED &&
+    !Blynk.connected()
+  ) {
+    if (now - lastBlynkAttempt >= 5000) {
+      lastBlynkAttempt = now;
+      Blynk.connect(10);
+    }
+  }
+
+  // Process Blynk messages and app button presses
+  if (Blynk.connected()) {
+    Blynk.run();
+  }
+
+  // Always check physical button
+  handleButton();
+
+  if (!sensorReady) {
+    delay(1);
+    return;
+  }
+
+  now = millis();
+
+  if (now - lastSensorTime < SENSOR_INTERVAL) {
+    delay(1);
+    return;
+  }
+
+  lastSensorTime = now;
+
+  // Read accelerometer
+  int16_t rawAX = read16(0x3B);
+  int16_t rawAY = read16(0x3D);
+  int16_t rawAZ = read16(0x3F);
+
+  // Convert to g at +/- 2 g range
+  float ax = rawAX / 16384.0;
+  float ay = rawAY / 16384.0;
+  float az = rawAZ / 16384.0;
+
+  // Fall/impact detection
+  detectFall(ax, ay, az);
+
+  // Read gyroscope
+  int rawGX = read16(0x43);
+  int rawGY = read16(0x45);
+
+  // Apply calibration offsets
+  rawGX -= gyroOffsetX;
+  rawGY -= gyroOffsetY;
+
+  float targetX = 0;
+  float targetY = 0;
+
+  // Horizontal mouse movement
+  if (abs(rawGY) > deadZone) {
+    targetX = rawGY * sensitivity;
+  }
+
+  // Vertical mouse movement
+  if (abs(rawGX) > deadZone) {
+    targetY = -rawGX * sensitivity;
+  }
+
+  // Smooth mouse movement
+  smoothX =
+    smoothFactor * smoothX +
+    (1.0 - smoothFactor) * targetX;
+
+  smoothY =
+    smoothFactor * smoothY +
+    (1.0 - smoothFactor) * targetY;
+
+  int moveX = constrain(
+    (int)smoothX,
+    -maxMove,
+    maxMove
+  );
+
+  int moveY = constrain(
+    (int)smoothY,
+    -maxMove,
+    maxMove
+  );
+
+  // Move Bluetooth mouse only when paired
+  if (
+    mouse.isPaired() &&
+    (moveX != 0 || moveY != 0)
+  ) {
+    mouse.move(moveX, moveY);
+  }
+
+  delay(1);
+}
