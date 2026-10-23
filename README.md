@@ -44,6 +44,17 @@ Used for the OLED display.
 
 Provides interactive webpage controls and the five-second dwell-trigger functionality. Cursor interaction and webpage actions depend on the implemented software.
 
+Live Website:
+Explore the CareConnect Assistive Communication System:
+
+🔗 Website: https://careconnect-assistive-communication-4.ai.studio
+
+Project Resources
+
+- Live Demo: "CareConnect Website" (https://careconnect-assistive-communication-4.ai.studio)
+- Source Code: Available in this repository, subject to the files uploaded.
+- Hardware Firmware: See the "firmware/" directory.
+
 ## Blynk IoT
 
 Used to deliver SOS and fall-related notifications to the connected phone.
