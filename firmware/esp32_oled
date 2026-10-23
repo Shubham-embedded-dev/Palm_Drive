@@ -1,0 +1,183 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// ================= OLED SETTINGS =================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define OLED_ADDRESS 0x3C
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  OLED_RESET
+);
+
+// ================= ANIMATION SETTINGS =================
+const unsigned long SLIDE_DURATION = 3000;
+const unsigned long FISH_FRAME_DELAY = 40;
+
+unsigned long slideStartTime = 0;
+unsigned long lastFishFrameTime = 0;
+
+int currentSlide = 0;
+
+// Fish position
+int fishX = -30;
+int fishY = 24;
+
+// ================= DRAW FISH =================
+void drawFish(int x, int y) {
+
+  // Tail
+  display.fillTriangle(
+    x, y + 7,
+    x - 10, y,
+    x - 10, y + 14,
+    SSD1306_WHITE
+  );
+
+  // Body
+  display.fillRoundRect(
+    x, y + 1,
+    20, 12,
+    5,
+    SSD1306_WHITE
+  );
+
+  // Top fin
+  display.fillTriangle(
+    x + 7, y + 2,
+    x + 12, y - 4,
+    x + 15, y + 2,
+    SSD1306_WHITE
+  );
+
+  // Eye
+  display.fillCircle(
+    x + 15, y + 5,
+    1,
+    SSD1306_BLACK
+  );
+}
+
+// ================= SLIDE 1: CARE CONNECT =================
+void showWelcomeScreen() {
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  // Care
+  display.setTextSize(2);
+  display.setCursor(34, 5);
+  display.println("Care");
+
+  // Connect below Care
+  display.setCursor(22, 25);
+  display.println("Connect");
+
+  // Tagline
+  display.setTextSize(1);
+  display.setCursor(19, 51);
+  display.println("Your Care Matters");
+
+  display.display();
+}
+
+// ================= SLIDE 2: TINY FISH =================
+void showFishScreen() {
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  // Moving fish
+  drawFish(fishX, fishY);
+
+  // Text below fish
+  display.setTextSize(1);
+  display.setCursor(8, 52);
+  display.println("Powered by TinyFish");
+
+  display.display();
+}
+
+// ================= SETUP =================
+void setup() {
+
+  Serial.begin(115200);
+
+  Wire.begin(21, 22);
+
+  if (!display.begin(
+        SSD1306_SWITCHCAPVCC,
+        OLED_ADDRESS
+      )) {
+
+    Serial.println("OLED initialization failed!");
+
+    while (true) {
+      delay(100);
+    }
+  }
+
+  display.clearDisplay();
+  display.display();
+
+  // Start with welcome slide
+  currentSlide = 0;
+  slideStartTime = millis();
+
+  showWelcomeScreen();
+
+  Serial.println("CareConnect OLED started.");
+}
+
+// ================= MAIN LOOP =================
+void loop() {
+
+  unsigned long now = millis();
+
+  // Change slide every 3 seconds
+  if (now - slideStartTime >= SLIDE_DURATION) {
+
+    slideStartTime = now;
+
+    if (currentSlide == 0) {
+
+      // Welcome -> Fish
+      currentSlide = 1;
+      fishX = -20;
+      lastFishFrameTime = now;
+
+      showFishScreen();
+
+    } else {
+
+      // Fish -> Welcome
+      currentSlide = 0;
+
+      showWelcomeScreen();
+    }
+  }
+
+  // Animate fish while fish slide is active
+  if (
+    currentSlide == 1 &&
+    now - lastFishFrameTime >= FISH_FRAME_DELAY
+  ) {
+
+    lastFishFrameTime = now;
+
+    showFishScreen();
+
+    // Move fish right
+    fishX += 2;
+
+    // Restart from left edge
+    if (fishX > SCREEN_WIDTH + 10) {
+      fishX = -20;
+    }
+  }
+}
